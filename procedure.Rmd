@@ -1,0 +1,442 @@
+---
+title: "Maddie's data analysis"
+author: "Javier Tabima and Manning DelCogliano"
+date: "2023-12-16"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading libraries
+
+```{R}
+library(dada2)
+library(tidyverse)
+library(googlesheets4)
+library(viridis)
+library(ggpubr)
+```
+
+# Creating in PS object
+
+```{r}
+gs4_deauth()
+ww.metadata <- read_sheet(
+  "https://docs.google.com/spreadsheets/d/1-R5HzaB2c5bHIbekrREiTmvWsC1Y-jhv5wHbcgmy5uc/edit#gid=51094388", sheet = 6
+)
+ 
+seqtab.nochim <- readRDS("/Smaug_SSD/MBB101/SaWheeler/nochimera.RDS")
+taxa <- readRDS("/Smaug_SSD/MBB101/SaWheeler/taxa.RDS")
+
+samples.out <- rownames(seqtab.nochim)
+location <- gsub(samples.out, pattern = "\\d+.+", replacement = "", perl = T) # set location to be just the letters in the sample name
+samdf <- data.frame(Location=location)
+rownames(samdf) <- samples.out 
+
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               sample_data(samdf), 
+               tax_table(taxa))
+
+dna <- Biostrings::DNAStringSet(taxa_names(ps)) #is this the sequences 
+names(dna) <- taxa_names(ps) #is this the names of the sequences 
+ps <- merge_phyloseq(ps, dna) 
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps))) #assign ASV names to DNA sequences within each sample to make things succinct
+ps
+
+
+to_remove <- grep(x=sample_names(ps), pattern = "^M\\d+|^SBFM\\d+|^UP\\d+|^W\\d+|^WN4.raw|PR21B.raw|PR21B|PR22B|CR11B|BB24B|CP24B|CP32B|BB14A|MB12B|MB14B|BB23A|CP42ASed.raw|PR51J.raw", perl = T, value = T) 
+
+ps_ww <- prune_samples(sample_names(ps)[!(sample_names(ps) %in% to_remove)], ps)
+
+
+ps_ww@sam_data$Site <- ww.metadata$Site[match(rownames(ps_ww@sam_data),ww.metadata$SampleName)]
+
+ps_ww@sam_data$SampleType <-ww.metadata$SampleType[match(rownames(ps_ww@sam_data),ww.metadata$SampleName)]
+
+ps_ww@sam_data$SiteType <- ww.metadata$SiteType[match(rownames(ps_ww@sam_data),ww.metadata$SampleName)]
+
+ps_ww@sam_data$Urbanization <- ww.metadata$Urbanization[match(rownames(ps_ww@sam_data),ww.metadata$SampleName)]
+
+ps_ww@sam_data$SampleName <-rownames(ps_ww@sam_data)
+
+ps_ww@sam_data$HostSpecies <- ww.metadata$HostSpecies[match(rownames(ps_ww@sam_data),ww.metadata$SampleName)]
+
+ps_ww@sam_data$PISA <- ww.metadata$PISA[match(rownames(ps_ww@sam_data),ww.metadata$SampleName)]
+
+saveRDS(ps_ww, file = "/Tabima_lab/lab_data/Maddie_paper/ps.Rds")
+ps_ww <- readRDS(file = "/Tabima_lab/lab_data/Maddie_paper/ps.Rds")
+
+```
+
+### Removing all non-fecal data
+
+```{r}
+ps.final <- subset_samples(ps_ww, SampleType == "Fecal") 
+saveRDS(ps.final, file = "/Tabima_lab/lab_data/Maddie_paper/ps.final.Rds")
+ps.final <- readRDS(file = "/Tabima_lab/lab_data/Maddie_paper/ps.final.Rds")
+```
+
+
+### Total number of samples
+
+
+```{r}
+table(ps.final@sam_data$HostSpecies)
+```
+***
+
+# Basidiobolus analysis
+
+```{r}
+basid <- subset_taxa(ps.final, Phylum=="p__Basidiobolomycota")
+dna <- Biostrings::DNAStringSet(taxa_names(basid))
+names(dna) <- taxa_names(basid)
+basid <- merge_phyloseq(basid, dna)
+taxa_names(basid) <- paste0("ASV", seq(ntaxa(basid)))
+
+
+# Pruning data
+basid <- prune_taxa(taxa_sums(basid) > 10, basid) 
+basid <- prune_samples(sample_sums(basid) > 30, basid)
+basid <- subset_samples(basid, HostSpecies %in% c("Lithobates clamitans", "Lithobates catesbeianus", "Lithobates palustris", "Plethodon cinereus"))
+
+# Saving object
+saveRDS(basid, file = "/Tabima_lab/lab_data/Maddie_paper/basid.Rds")
+basid <- readRDS(file = "/Tabima_lab/lab_data/Maddie_paper/basid.Rds")
+Biostrings::writeXStringSet(basid@refseq, file = "/Tabima_lab/lab_data/Maddie_paper/Basidiobolus_asv.fasta", format = "fasta")
+write.table(basid@tax_table, file = "/Tabima_lab/lab_data/Maddie_paper/Taxa_table.txt", quote = F, sep = "\t")
+```
+
+## General Basi stats
+
+```{R}
+ggplot(data.frame(basid@sam_data) %>% group_by(Urbanization,Site, HostSpecies) %>% tally(), aes(x=Site, y=HostSpecies, label = n, fill=n)) + 
+  geom_tile(stat="identity", color = "grey") + 
+   geom_text(aes(label = n), color = "white", size = 4) + 
+  facet_grid(. ~ Urbanization, scales= "free", space = "free") + 
+  theme_classic() +
+  scale_fill_continuous(na.value = 'white') + 
+  scale_x_discrete(guide = guide_axis(angle = 90))+ ylab("Host Species")
+  
+
+data.frame(basid@sam_data) %>% group_by(Site) %>% tally()
+
+```
+
+### Samples with Basi
+
+```{r}
+ps.final@sam_data$SampleName[!ps.final@sam_data$SampleName %in% basid@sam_data$SampleName]
+```
+
+# Novel ITS
+
+### Extracting unknown ASV's
+
+```{r}
+na.basi <- names(basid@tax_table@.Data[,'Species'])[is.na(basid@tax_table@.Data[,'Species'])]
+basid.na <- basid@refseq[names(basid@refseq) %in% na.basi]
+writeXStringSet(basid.na, filepath = "/Tabima_lab/lab_data/Maddie_paper/Basi_ITS_NA.fasta")
+```
+
+#### Adding UNITE Basidiobolus
+
+```{r}
+library(seqinr)
+unite.db <- read.fasta("/Tabima_lab/raw_data/watershed/fecal/sh_general_release_dynamic_16.10.2022.fasta")
+basi.unite <- unite.db[grep(pattern = "Basidiobolus", getName(unite.db))]
+basi.unite <- basi.unite[grep(pattern = "_sp", getName(basi.unite),invert = T)]
+seqinr::write.fasta(basi.unite, names = getName(basi.unite), file.out = "basi.unite.fasta", nbchar = 10000)
+```
+
+```bash
+mafft --adjustdirectionaccurately Basi_all.fasta > Basi.alin.fasta
+clipkit Basi.alin.fasta -m gappy -g 0.4
+```
+
+```{r}
+library(msaR)
+basi.alin <- read.FASTA("Basi.alin.fasta.clipkit")
+msaR(basi.alin)
+```
+
+```bash
+/Smaug_SSD/bin/iqtree2 -s Basi.alin.fasta.clipkit -B 1000
+```
+
+```{r}
+library(ggtree)
+library(ape)
+library(phangorn)
+
+its.tree <- read.tree("Basi.alin.fasta.clipkit.treefile")
+its.tree <- root(its.tree, outgroup = "Conidiobolus_sp._ARSEF_7942", resolve.root = T, edgelabel = T)
+
+#its.tree.drop <- drop.tip(its.tree.drop, "Conidiobolus_sp._ARSEF_7942")
+p <- ggtree(its.tree) + geom_tiplab(linesize=.5) + geom_nodelab(size=4, vjust=-1, hjust=1)
+p
+```
+
+
+### Changing taxonomy in TAXA object
+
+```{r}
+ASV_novel <- read.table('ASV_assignment.txt')
+table(ASV_novel$V2)
+```
+
+### Total per assignment
+```{r}
+basid@tax_table@.Data[is.na(basid@tax_table@.Data[,'Species']),7] <- ASV_novel$V2
+```
+
+## Abundance per OTU 
+
+###per Site
+
+```{r}
+## Species
+basi.present.df <- as.data.frame(otu_table(basid)@.Data)
+basi.present.df[basi.present.df == 0] <- NA
+basi.present.df$SampleName <- rownames(basi.present.df)
+basi.present.df <- pivot_longer(basi.present.df, !SampleName)
+basi.present.df <- basi.present.df[!is.na(basi.present.df$value),]
+
+
+basi.merged.df <- merge(basi.present.df, sample_data(basid) %>% data.frame, by.x="SampleName")
+basi.merged.df <- basi.merged.df[!is.na(basi.merged.df$value),]
+basi.merged.df <- tibble(basi.merged.df)
+
+# Site summary
+site.summary <- basi.merged.df %>% group_by(Site) %>% dplyr::count(SampleName)
+site.summary %>% dplyr::count(Site)
+
+site_diffs <- aov(lm(data = site.summary, formula = n ~ Site))
+summary(site_diffs)
+TukeyHSD(site_diffs, ordered = T)
+
+box_site <- ggplot(site.summary, aes(x=Site, y=n, fill=Site)) + geom_boxplot() + theme_classic() + scale_fill_grey(start = 0.3) + scale_x_discrete(guide = guide_axis(angle = 90)) + ylab("Number of Basidiobolus ASV's")
+
+# Host summary
+site.summary <- basi.merged.df %>% group_by(HostSpecies) %>% dplyr::count(SampleName)
+
+host_diffs<- aov(lm(data = site.summary, formula = n ~ HostSpecies))
+summary(host_diffs)
+TukeyHSD(host_diffs)
+box_host <- ggplot(site.summary, aes(x=HostSpecies, y=n, fill=HostSpecies)) + geom_boxplot() + theme_classic() + scale_fill_grey(start = 0.3) + scale_x_discrete(guide = guide_axis(angle = 90)) + ylab("Number of Basidiobolus ASV's")
+
+# Urbanization summary
+site.summary <- basi.merged.df %>% group_by(Urbanization) %>% dplyr::count(SampleName)
+urb_diffs <- aov(lm(data = site.summary, formula = n ~ Urbanization))
+summary(urb_diffs)
+TukeyHSD(urb_diffs)
+box_urb <- ggplot(site.summary, aes(x=Urbanization, y=n, fill=Urbanization)) + geom_boxplot() + theme_classic() + scale_fill_grey(start = 0.3) + scale_x_discrete(guide = guide_axis(angle = 90))+ ylab("Number of Basidiobolus ASV's")
+
+# FIGURE 2:
+ggarrange(box_site, box_host, box_urb, ncol = 3, nrow = 1, legend = "none")
+
+# Figure 3:
+ps.prop <- transform_sample_counts(basid, function(otu) otu/sum(otu))
+plot_bar(ps.prop, fill = "Species") +  geom_col(position = "fill") + viridis::scale_fill_viridis(discrete = T) + facet_grid(. ~ Site, scales = "free_x", space = "free_x") + theme(legend.position = 'bottom')
+
++ theme_bw()
+```
+
+Cook	21
+Coe's	23
+Mill	23
+Patch	29
+Barre	30
+Middle	32
+Kinney	44
+Moose	44
+Tatnuck	50
+Thayer	72
+
+## Shannon index
+
+```{r}
+
+richness.basi <- estimate_richness(basid)
+anova.sh = aov(richness.basi$Shannon ~ sample_data(basid)$Site)
+anova.sh = aov(richness.basi$Shannon ~ sample_data(basid)$HostSpecies)
+anova.sh = aov(richness.basi$Shannon ~ sample_data(basid)$Urbanization)
+summary(anova.sh)
+TukeyHSD(anova.sh)
+
+div.sites <- plot_richness(basid, x = "Site", measures = c("Shannon")) + geom_boxplot() + theme_classic() + scale_fill_grey(start = 0.3) + scale_x_discrete(guide = guide_axis(angle = 90))
+div.hosts <- plot_richness(basid, x = "HostSpecies", measures = c("Shannon")) + geom_boxplot() + theme_classic() + scale_fill_grey(start = 0.3)  + scale_x_discrete(guide = guide_axis(angle = 90))
+div.urb <- plot_richness(basid, x = "Urbanization", measures = c("Shannon")) + geom_boxplot() + theme_classic() + scale_fill_grey(start = 0.3) + scale_x_discrete(guide = guide_axis(angle = 90))
+
+
+ggarrange(div.sites, div.hosts, div.urb, cols = 3, nrow = 1, legend = "none")
+```
+
+## Beta Diversity
+
+
+## NMDS
+```{r}
+ps.prop <- transform_sample_counts(basid, function(otu) otu/sum(otu))
+ord.nmds.bray <- ordinate(ps.prop, method="NMDS", distance="bray")
+
+# Sites
+site.nmds <- plot_ordination(basid, ord.nmds.bray, color="Site", label="SampleName") + geom_point() + stat_ellipse() + theme_classic() + theme(legend.position = "bottom") + scale_color_viridis(discrete = T, end = 0.8)
+adonis2(basid@otu_table ~ basid@sam_data$Site, method='bray', permutations = 999)
+
+# Host
+host.nmds <- plot_ordination(basid, ord.nmds.bray, color="HostSpecies", label="SampleName") + geom_point() + stat_ellipse() + theme_classic() + theme(legend.position = "bottom") + scale_color_viridis(discrete = T, end = 0.8)
+adonis2(basid@otu_table ~ basid@sam_data$HostSpecies, method='bray', permutations = 999)
+
+# Urbanization
+urb.nmds <- plot_ordination(basid, ord.nmds.bray, color="Urbanization", label="SampleName") + geom_point() + stat_ellipse() + theme_classic() + theme(legend.position = "bottom") + scale_color_viridis(discrete = T, end = 0.8)
+adonis2(basid@otu_table ~ basid@sam_data$Urbanization, method='bray', permutations = 999)
+
+ggarrange(site.nmds, host.nmds, urb.nmds, cols = 3, nrow = 1)
+```
+
+# Geographic separation
+
+## Mantel's test
+
+```{r}
+#1. Lat long distance
+gs4_deauth()
+summer.ww <- read_sheet("https://docs.google.com/spreadsheets/d/1-R5HzaB2c5bHIbekrREiTmvWsC1Y-jhv5wHbcgmy5uc/edit#gid=51094388", sheet = 5)
+dist.df <- cbind(summer.ww$Latitude, summer.ww$Longitude)
+rownames(dist.df) <- summer.ww$Specimen
+dist.df <- dist.df[rownames(dist.df)  %in% rownames(basid@sam_data),]
+station.dists <- dist(dist.df)
+
+#2. Community distance
+dist.basi.locations <- phyloseq::distance(basid, method="bray", type = "Sites")
+
+# 3 Mantle's test
+bray_geo.mantle <- mantel(station.dists, dist.basi.locations, permutations = 10000)
+bray_geo.mantle
+plot(station.dists, dist.basi.locations)
+
+# 4. Lineal model
+
+gs4_deauth()
+metadata <- readxl::read_xlsx("DATA.xlsx")
+#metadata <- read_sheet("https://docs.google.com/spreadsheets/d/1-R5HzaB2c5bHIbekrREiTmvWsC1Y-jhv5wHbcgmy5uc/edit#gid=915474950", sheet= 6)
+
+library(lme4)
+library(lmerTest)
+linear <- lm(Shannon ~ host*Area*Site, data = metadata)
+summary(linear)
+aov(linear) %>% summary
+
+lineal <- lmer(Shannon ~ Species*Area*Site +  (1|Day), data=metadata)
+anova(lineal) 
+ranova(lineal)
+summary(lineal)
+```
+
+Mantel statistic r: 0.06062 
+Significance: 0.092291 
+
+## Unique samples DESeq
+
+```{r}
+
+library(DESeq2)
+hostdds = phyloseq_to_deseq2(basid, ~ HostSpecies)
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(hostdds), 1, gm_mean)
+hostdds = estimateSizeFactors(hostdds, geoMeans = geoMeans)
+hostdds = DESeq(hostdds, fitType="local")
+
+res = results(hostdds)
+res = res[order(res$padj, na.last=NA), ]
+alpha = 0.01
+sigtab = res[(res$padj < alpha), ]
+sigtab = cbind(as(sigtab, "data.frame"), as(tax_table(basid)[rownames(sigtab), ], "matrix"))
+head(sigtab)
+
+sigtabgen = subset(sigtab, !is.na(Genus))
+# Phylum order
+x = tapply(sigtabgen$log2FoldChange, sigtabgen$Phylum, function(x) max(x))
+x = sort(x, TRUE)
+sigtabgen$Phylum = factor(as.character(sigtabgen$Phylum), levels=names(x))
+# Genus order
+x = tapply(sigtabgen$log2FoldChange, sigtabgen$Genus, function(x) max(x))
+x = sort(x, TRUE)
+sigtabgen$Genus = factor(as.character(sigtabgen$Genus), levels=names(x))
+ggplot(sigtabgen, aes(y=Species, x=log2FoldChange, color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
+  geom_point(size=6) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+```
+
+## Unique samples counts
+
+### Host species
+```{r}
+total.basi <- psmelt(basid)
+
+host_asv <- total.basi %>% group_by(HostSpecies, OTU) %>% summarise(sum(Abundance))
+host_asv <- pivot_wider(host_asv, names_from = HostSpecies, values_from = `sum(Abundance)`)
+
+# Species and ASV's across all species
+asv_all <- cbind(as(host_asv, "data.frame"), as(tax_table(basid)[host_asv$OTU, ], "matrix"))
+asv_all <- pivot_longer(asv_all, cols=c('Lithobates catesbeianus','Lithobates clamitans', 'Lithobates palustris', 'Plethodon cinereus'))
+asv_all <- asv_all[asv_all$value > 0,]
+asv_all <- asv_all %>% group_by(Species, name) %>% dplyr::count(name)
+asv_all <- pivot_wider(asv_all, names_from = name, values_from = n)
+
+host_single <- host_asv[apply(host_asv[,-1], 2, function (x) {x == 0}) %>% rowSums == 3,]
+host_single <- cbind(as(host_single, "data.frame"), as(tax_table(basid)[host_single$OTU, ], "matrix"))
+host_single <- pivot_longer(host_single, cols=c('Lithobates catesbeianus','Lithobates clamitans', 'Lithobates palustris', 'Plethodon cinereus'))
+host_single <- host_single[host_single$value > 0,]
+host_single <- host_single %>% group_by(Species, name) %>% dplyr::count(name)
+pivot_wider(host_single, names_from = name, values_from = n)
+
+ggplot(host_single, aes(x=name, y=n, fill=Species)) + geom_bar(stat="identity", position = "stack")
+```
+
+### Urbanization gradient
+
+```{r}
+urb.basi <- total.basi %>% group_by(Urbanization, OTU) %>% summarise(sum(Abundance))
+
+urb.basi.sum <- pivot_wider(urb.basi, names_from = Urbanization, values_from = `sum(Abundance)`)
+unique.urb <- urb.basi.sum[apply(urb.basi.sum[,-1], 2, function (x) {x == 0}) %>% rowSums == 1,]
+```
+
+### Shared betwen urbanization areas
+```{r}
+shared.urb <- urb.basi.sum[apply(urb.basi.sum[,-1], 2, function (x) {x == 0}) %>% rowSums == 0,]
+
+shared.urb <- cbind(as(shared.urb, "data.frame"), as(tax_table(basid)[shared.urb$OTU, ], "matrix"))
+shared.urb$total.ab <- (shared.urb$High + shared.urb$Low)
+shared.urb$low.perc <- ((shared.urb$Low/shared.urb$total.ab) * 100) * -1
+shared.urb$high.perc <- (shared.urb$High/shared.urb$total.ab) * 100
+shared.urb <- pivot_longer(shared.urb, cols=c('low.perc','high.perc'))
+
+ ggplot(shared.urb, aes(x=OTU,fill=name,y=value)) + 
+   geom_bar(stat="identity") + 
+   geom_hline(aes(yintercept=0)) + 
+   facet_grid(. ~ Species, scales = "free_x", space = "free") + 
+   theme_classic() + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5))
+```
+
+### Unique per urbanization areas
+```{r}
+
+urb.summ <- pivot_longer(unique.urb, cols=c('High','Low'))
+urb.summ <- urb.summ[!urb.summ$value == 0,]
+urb.summ <- cbind(as(urb.summ, "data.frame"), as(tax_table(basid)[urb.summ$OTU, ], "matrix"))
+
+table(urb.summ$name)
+
+ggplot(urb.summ %>% group_by(name, Species) %>% tally(), aes(x=name,y=n,fill=Species)) + geom_bar(stat="identity") + theme_classic() + scale_fill_viridis(discrete = T)
+``` 
